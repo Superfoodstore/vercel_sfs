@@ -15,6 +15,7 @@
 //             "daily": één rij per dag (max 93 dagen), handig voor tijdreeksen
 //   category  "1" → uitsplitsen per biedcategorie (include=category)
 //   format    "json" (standaard) of "csv" (puntkomma, Nederlandse kolomkoppen)
+//   raw       "1" → ruwe beslist-response voor één dag (alleen met date), voor debuggen
 //   Zonder date/start/end: gisteren.
 //
 // Voorbeelden:
@@ -23,6 +24,7 @@
 
 const BASE = "https://shopstats.api.beslist.nl/stats/v3";
 const MAX_DAILY_DAYS = 93;
+let rawMode = false;
 
 async function shopstats(path, withCategory) {
   const apiKey = process.env.BESLIST_SHOPSTATS_API_KEY;
@@ -40,7 +42,19 @@ async function shopstats(path, withCategory) {
     throw err;
   }
   const json = await resp.json();
-  return json.data || [];
+  if (rawMode) return json;
+  return normalize(json);
+}
+
+// Het enkele-dag-endpoint en het periode-endpoint hebben verschillende response-schema's
+// (api_response_stat_v3 vs api_response_stat_v3_range). Vang beide vormen op.
+function normalize(json) {
+  let d = json?.data ?? json?.stats ?? json?.stat ?? json;
+  if (d && !Array.isArray(d) && typeof d === "object") {
+    const inner = d.stats ?? d.stat ?? d.categories ?? d.items;
+    d = Array.isArray(inner) ? inner : [d];
+  }
+  return Array.isArray(d) ? d.filter((r) => r && typeof r === "object" && "clicks" in r) : [];
 }
 
 // "2026-08-01" of "20260801" → Date (UTC)
@@ -127,11 +141,12 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Alleen GET" });
 
-  const { key, date, start, end, mode = "total", category, format = "json" } = req.query;
+  const { key, date, start, end, mode = "total", category, format = "json", raw } = req.query;
   const expected = process.env.SHOPSTATS_PROXY_KEY;
   if (!expected || key !== expected) return res.status(401).json({ error: "Ongeldige of ontbrekende key" });
 
   const withCategory = category === "1" || category === "true";
+  rawMode = raw === "1";
   const yesterday = yesterdayAmsterdam();
 
   try {
@@ -159,6 +174,7 @@ export default async function handler(req, res) {
     } else {
       const d = date ? parseDate(date) : yesterday;
       if (!d) return res.status(400).json({ error: "date is ongeldig" });
+      if (rawMode) return res.status(200).json(await shopstats(`/${ymd(d)}`, withCategory));
       rows = (await shopstats(`/${ymd(d)}`, withCategory)).map((r) => toRow({ ...r, date: r.date || iso(d) }));
     }
 
