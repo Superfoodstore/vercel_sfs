@@ -8,6 +8,7 @@
 //
 // Aanroep: /api/awin-costs?key=...&start=2026-09-01&end=2026-09-30[&format=csv|json][&override=30]
 //          &mode=publishers  geeft totalen per publisher over de periode (kliks, transacties, commissie)
+//          &mode=orders      geeft elke transactie met orderRef, publisher en vouchercode (om aan Eyk-orders te koppelen)
 
 const API = "https://api.awin.com";
 const TZ = "Europe/Berlin"; // zelfde tijdzone als Amsterdam; Awin accepteert een vaste lijst zones
@@ -91,6 +92,29 @@ export default async function handler(req, res) {
   if (addDays(start, 366) < end) return res.status(400).json({ error: "Maximaal een jaar per aanvraag." });
 
   const override = Number(q.override ?? process.env.AWIN_OVERRIDE_PCT ?? 0) || 0;
+
+  if (q.mode === "orders") {
+    try {
+      const out = [];
+      for (let from = start; from <= end; from = addDays(from, 31)) {
+        const to = addDays(from, 30) < end ? addDays(from, 30) : end;
+        for (const t of await fetchChunk(adv, token, from, to)) {
+          const status = String(t.commissionStatus || "").toLowerCase();
+          const comm = Number(t.commissionAmount?.amount) || 0;
+          out.push({ date: String(t.transactionDate || "").slice(0, 10), orderRef: t.orderRef ?? "", publisherId: String(t.publisherId ?? ""),
+            siteName: t.siteName || "", status, voucher: t.voucherCodeUsed ? (t.voucherCode || "ja") : "", clickDate: t.clickDate || "",
+            revenue: r2(Number(t.saleAmount?.amount) || 0), commission: r2(comm), costs: COUNTED.has(status) ? r2(comm * (1 + override / 100)) : 0 });
+        }
+      }
+      res.setHeader("Cache-Control", "no-store");
+      if (q.format === "json") return res.status(200).json({ start, end, overridePct: override, transactions: out });
+      const head = "Datum;Order-ref;Publisher-ID;Publisher;Status;Voucher;Klikdatum;Omzet;Commissie;Kosten";
+      const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="awin-orders-${start}_${end}.csv"`);
+      return res.status(200).send([head, ...out.map((t) => [t.date, esc(t.orderRef), t.publisherId, esc(t.siteName), t.status, esc(t.voucher), t.clickDate, t.revenue, t.commission, t.costs].join(";"))].join("\n"));
+    } catch (e) { return res.status(e.status || 502).json({ error: e.message }); }
+  }
 
   if (q.mode === "publishers") {
     try { return await publishers(req, res, { adv, token, start, end, override, format: q.format }); }
