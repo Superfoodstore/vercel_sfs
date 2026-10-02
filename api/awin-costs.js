@@ -7,6 +7,7 @@
 //   AWIN_PROXY_KEY       sleutel voor deze endpoint (valt terug op SHOPSTATS_PROXY_KEY)
 //
 // Aanroep: /api/awin-costs?key=...&start=2026-09-01&end=2026-09-30[&format=csv|json][&override=30]
+//          &mode=publishers  geeft totalen per publisher over de periode (kliks, transacties, commissie)
 
 const API = "https://api.awin.com";
 const TZ = "Europe/Berlin"; // zelfde tijdzone als Amsterdam; Awin accepteert een vaste lijst zones
@@ -32,6 +33,51 @@ async function fetchChunk(adv, token, from, to) {
   return res.json();
 }
 
+async function fetchPublisherChunk(adv, token, from, to) {
+  const u = new URL(`${API}/advertisers/${adv}/reports/publisher`);
+  u.searchParams.set("startDate", from);
+  u.searchParams.set("endDate", to);
+  u.searchParams.set("region", "NL");
+  u.searchParams.set("timezone", TZ);
+  const res = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 429) throw Object.assign(new Error("Awin rate limit bereikt, probeer het over een minuut opnieuw."), { status: 429 });
+  if (!res.ok) throw Object.assign(new Error(`Awin API ${res.status}: ${(await res.text()).slice(0, 300)}`), { status: 502 });
+  return res.json();
+}
+
+async function publishers(req, res, { adv, token, start, end, override, format }) {
+  const P = {};
+  const n = (v) => Number(v) || 0;
+  for (let from = start; from <= end; from = addDays(from, 31)) {
+    const to = addDays(from, 30) < end ? addDays(from, 30) : end;
+    const list = await fetchPublisherChunk(adv, token, from, to);
+    for (const r of Array.isArray(list) ? list : []) {
+      const id = String(r.publisherId ?? "");
+      if (!id) continue;
+      const p = (P[id] ||= { publisherId: id, name: "", clicks: 0, impressions: 0, transactions: 0, revenue: 0, commission: 0, pendingCommission: 0, declined: 0, declinedValue: 0 });
+      p.name = r.publisherName || p.name;
+      p.clicks += n(r.clicks); p.impressions += n(r.impressions);
+      p.transactions += n(r.pendingNo) + n(r.confirmedNo);
+      p.revenue += n(r.pendingValue) + n(r.confirmedValue);
+      p.commission += n(r.pendingComm) + n(r.confirmedComm) + n(r.bonusComm);
+      p.pendingCommission += n(r.pendingComm);
+      p.declined += n(r.declinedNo); p.declinedValue += n(r.declinedValue);
+    }
+  }
+  const rows = Object.values(P)
+    .map((p) => ({ ...p, revenue: r2(p.revenue), commission: r2(p.commission), pendingCommission: r2(p.pendingCommission), declinedValue: r2(p.declinedValue), costs: r2(p.commission * (1 + override / 100)) }))
+    .filter((p) => p.clicks || p.transactions || p.commission || p.declined)
+    .sort((a, b) => b.costs - a.costs);
+  res.setHeader("Cache-Control", "no-store");
+  if (format === "json") return res.status(200).json({ start, end, overridePct: override, publishers: rows });
+  const head = "Periode van;Periode tot;Publisher-ID;Publisher;Kliks;Vertoningen;Transacties;Omzet;Commissie;Waarvan pending;Override %;Kosten;Afgekeurd;Afgekeurde omzet";
+  const esc = (s) => `"${String(s).replace(/"/g, '""')}"`;
+  const lines = rows.map((p) => [start, end, p.publisherId, esc(p.name), p.clicks, p.impressions, p.transactions, p.revenue, p.commission, p.pendingCommission, override, p.costs, p.declined, p.declinedValue].join(";"));
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="awin-publishers-${start}_${end}.csv"`);
+  return res.status(200).send([head, ...lines].join("\n"));
+}
+
 export default async function handler(req, res) {
   const q = req.query || {};
   const expected = process.env.AWIN_PROXY_KEY || process.env.SHOPSTATS_PROXY_KEY;
@@ -45,6 +91,11 @@ export default async function handler(req, res) {
   if (addDays(start, 366) < end) return res.status(400).json({ error: "Maximaal een jaar per aanvraag." });
 
   const override = Number(q.override ?? process.env.AWIN_OVERRIDE_PCT ?? 0) || 0;
+
+  if (q.mode === "publishers") {
+    try { return await publishers(req, res, { adv, token, start, end, override, format: q.format }); }
+    catch (e) { return res.status(e.status || 502).json({ error: e.message }); }
+  }
 
   // Eén rij per dag, ook dagen zonder transacties (zo weet het dashboard dat de dag 0 kostte).
   const days = {};
