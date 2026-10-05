@@ -20,10 +20,24 @@ function b64url(buf){
   return Buffer.from(buf).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
+// Accepteert de sleutel in elke vorm waarin hij in Vercel geplakt kan worden:
+// het hele JSON-sleutelbestand, alleen "private_key", met of zonder aanhalingstekens, met letterlijke \n,
+// of met spaties waar regeleinden horen.
+function privateKey(){
+  let k = String(process.env.GMC_SA_KEY || "").trim();
+  if (!k) throw new Error("GMC_SA_KEY ontbreekt in Vercel");
+  if (k.startsWith("{")){ try { k = JSON.parse(k).private_key || ""; } catch { throw new Error("GMC_SA_KEY lijkt JSON maar is niet leesbaar; plak alleen de waarde van private_key"); } }
+  k = k.replace(/^["']|["']$/g, "").replace(/\\n/g, "\n").replace(/\r/g, "");
+  const m = /-----BEGIN ([A-Z ]*PRIVATE KEY)-----([\s\S]*?)-----END \1-----/.exec(k);
+  if (!m) throw new Error("GMC_SA_KEY bevat geen geldige private key (verwacht -----BEGIN PRIVATE KEY----- ... -----END PRIVATE KEY-----)");
+  const body = m[2].replace(/[^A-Za-z0-9+/=]/g, "");
+  return `-----BEGIN ${m[1]}-----\n${body.match(/.{1,64}/g).join("\n")}\n-----END ${m[1]}-----\n`;
+}
+
 async function accessToken(){
   const email = process.env.GMC_SA_EMAIL;
-  const key = String(process.env.GMC_SA_KEY || "").replace(/\\n/g, "\n");
-  if (!email || !key) throw new Error("GMC_SA_EMAIL of GMC_SA_KEY ontbreekt in Vercel");
+  const key = privateKey();
+  if (!email) throw new Error("GMC_SA_EMAIL of GMC_SA_KEY ontbreekt in Vercel");
   const now = Math.floor(Date.now() / 1000);
   const head = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const claim = b64url(JSON.stringify({ iss: email, scope: SCOPE, aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600 }));
