@@ -26,10 +26,25 @@ function b64url(buf){
 function privateKey(){
   let k = String(process.env.GMC_SA_KEY || "").trim();
   if (!k) throw new Error("GMC_SA_KEY ontbreekt in Vercel");
-  if (k.startsWith("{")){ try { k = JSON.parse(k).private_key || ""; } catch { throw new Error("GMC_SA_KEY lijkt JSON maar is niet leesbaar; plak alleen de waarde van private_key"); } }
+  if (k.startsWith("{")){
+    let j; try { j = JSON.parse(k); } catch { throw new Error("GMC_SA_KEY lijkt JSON maar is niet leesbaar; plak de hele inhoud van het sleutelbestand opnieuw, of alleen de waarde van private_key"); }
+    if (!j.private_key) throw new Error(`GMC_SA_KEY is JSON maar zonder private_key (wel: ${Object.keys(j).join(", ")}). Gebruik het sleutelbestand dat Google downloadt bij Serviceaccount → Sleutels → Sleutel toevoegen → JSON.`);
+    k = j.private_key;
+  }
   k = k.replace(/^["']|["']$/g, "").replace(/\\n/g, "\n").replace(/\r/g, "");
-  const m = /-----BEGIN ([A-Z ]*PRIVATE KEY)-----([\s\S]*?)-----END \1-----/.exec(k);
-  if (!m) throw new Error("GMC_SA_KEY bevat geen geldige private key (verwacht -----BEGIN PRIVATE KEY----- ... -----END PRIVATE KEY-----)");
+  let m = /-----BEGIN ([A-Z ]*PRIVATE KEY)-----([\s\S]*?)-----END \1-----/.exec(k);
+  if (!m){
+    const bare = k.replace(/[^A-Za-z0-9+/=]/g, "");
+    if (bare.length > 1000) m = [null, "PRIVATE KEY", bare];   // sleutel zonder BEGIN/END-regels
+    else {
+      // Niets van de sleutel zelf tonen, alleen een beschrijving om te zien wat er wél in staat
+      const what = /^[0-9a-f]{40}$/i.test(k) ? "dit lijkt de private_key_id (40 tekens), niet de private_key"
+        : /^\d{15,25}$/.test(k) ? "dit lijkt de client_id (alleen cijfers), niet de private_key"
+        : /@.*gserviceaccount\.com$/i.test(k) ? "dit lijkt het e-mailadres van het serviceaccount, niet de private_key"
+        : `de waarde is ${k.length} tekens lang; een private key is ongeveer 1.700 tekens`;
+      throw new Error(`GMC_SA_KEY bevat geen geldige private key: ${what}. Plak in Vercel de hele inhoud van het JSON-sleutelbestand, of de waarde van "private_key" (begint met -----BEGIN PRIVATE KEY-----).`);
+    }
+  }
   const body = m[2].replace(/[^A-Za-z0-9+/=]/g, "");
   return `-----BEGIN ${m[1]}-----\n${body.match(/.{1,64}/g).join("\n")}\n-----END ${m[1]}-----\n`;
 }
